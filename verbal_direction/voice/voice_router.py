@@ -196,13 +196,10 @@ class VoiceRouter:
 
     def _determine_target(self, text: str) -> str | None:
         """Determine which session a voice response targets."""
-        if not self._pending_questions:
-            # No pending questions — try all sessions
-            if len(self._sessions) == 1:
-                return next(iter(self._sessions))
+        if not self._sessions:
             return None
 
-        # Check for explicit session name prefix
+        # Check for explicit session name prefix (works with or without pending questions)
         text_lower = text.lower()
         for label in self._sessions:
             if text_lower.startswith(f"{label.lower()}:"):
@@ -210,17 +207,25 @@ class VoiceRouter:
             if text_lower.startswith(f"{label.lower()},"):
                 return label
 
-        # If only one session has a pending question, route there
-        if len(self._pending_questions) == 1:
-            return next(iter(self._pending_questions))
-
-        # Last-asked-first priority
-        for name, _ts in reversed(self._question_order):
-            if name in self._pending_questions:
-                return name
-
-        # Fallback: first pending session
+        # If there are pending questions, prioritize those sessions
         if self._pending_questions:
+            if len(self._pending_questions) == 1:
+                return next(iter(self._pending_questions))
+
+            # Last-asked-first priority
+            for name, _ts in reversed(self._question_order):
+                if name in self._pending_questions:
+                    return name
+
             return next(iter(self._pending_questions))
 
+        # No pending questions — still route if possible
+        if len(self._sessions) == 1:
+            return next(iter(self._sessions))
+
+        # Multiple sessions, no pending questions — log available targets
+        logger.info(
+            "Multiple sessions, no pending question. Prefix with session name: %s",
+            ", ".join(self._sessions.keys()),
+        )
         return None

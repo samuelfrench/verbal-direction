@@ -639,10 +639,12 @@ def run_desktop_app() -> None:
     window.set_audio_manager(audio)
     window.show()
 
+    # Exclude our own session: by TTY if available, or by CWD match
     own_tty = os.ttyname(0) if os.isatty(0) else None
+    own_cwd = os.getcwd()
 
     def filter_sessions(sessions):
-        return [s for s in sessions if s.tty != own_tty]
+        return [s for s in sessions if s.tty != own_tty and s.cwd != own_cwd]
 
     # Voice components
     attention_filter = AttentionFilter(config.ollama)
