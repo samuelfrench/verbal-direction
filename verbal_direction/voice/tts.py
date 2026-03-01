@@ -45,24 +45,21 @@ class TTSEngine:
                     f"Download it from https://huggingface.co/rhasspy/piper-voices"
                 )
 
-            self._voice = PiperVoice.load(str(model_path), use_cuda=True)
+            # Try CUDA first, fall back to CPU
+            try:
+                self._voice = PiperVoice.load(str(model_path), use_cuda=True)
+                logger.info("Piper TTS initialized with model: %s (CUDA)", self._config.tts_model)
+            except Exception:
+                self._voice = PiperVoice.load(str(model_path), use_cuda=False)
+                logger.info("Piper TTS initialized with model: %s (CPU)", self._config.tts_model)
+
             self._initialized = True
-            logger.info("Piper TTS initialized with model: %s (CUDA)", self._config.tts_model)
         except ImportError:
             logger.error("piper-tts not installed. Run: pip install piper-tts")
             raise
         except Exception as e:
-            logger.warning("Piper CUDA init failed, trying CPU: %s", e)
-            try:
-                from piper import PiperVoice
-
-                model_path = DEFAULT_VOICE_DIR / f"{self._config.tts_model}.onnx"
-                self._voice = PiperVoice.load(str(model_path), use_cuda=False)
-                self._initialized = True
-                logger.info("Piper TTS initialized with model: %s (CPU)", self._config.tts_model)
-            except Exception as e2:
-                logger.error("Piper TTS initialization failed: %s", e2)
-                raise
+            logger.error("Piper TTS initialization failed: %s", e)
+            raise
 
     def speak(self, text: str, session_name: str | None = None) -> None:
         """Speak text through the headset.
@@ -79,20 +76,27 @@ class TTSEngine:
         if session_name:
             text = f"{session_name} asks: {text}"
 
-        # Synthesize to WAV bytes
-        wav_buffer = io.BytesIO()
-        with wave.open(wav_buffer, "wb") as wav_file:
-            self._voice.synthesize(text, wav_file, length_scale=1.0 / self._config.tts_speed)
+        from piper.config import SynthesisConfig
 
-        # Read the WAV data
-        wav_buffer.seek(0)
-        with wave.open(wav_buffer, "rb") as wav_file:
-            sample_rate = wav_file.getframerate()
-            n_frames = wav_file.getnframes()
-            audio_data = wav_file.readframes(n_frames)
+        syn_config = SynthesisConfig(
+            length_scale=1.0 / self._config.tts_speed,
+        )
 
-        # Convert to numpy array
-        audio_array = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32) / 32768.0
+        # Synthesize to audio chunks
+        chunks = list(self._voice.synthesize(text, syn_config))
+        if not chunks:
+            logger.warning("TTS produced no audio")
+            return
+
+        # Concatenate all audio chunks
+        audio_data = np.concatenate([
+            np.frombuffer(chunk.audio_int16_bytes, dtype=np.int16)
+            for chunk in chunks
+        ])
+        audio_array = audio_data.astype(np.float32) / 32768.0
+
+        # Get sample rate from voice config
+        sample_rate = self._voice.config.sample_rate
 
         # Play through output device
         import sounddevice as sd
