@@ -1,4 +1,4 @@
-"""Voice router — routes transcribed speech to the correct session."""
+"""Voice router — routes transcribed speech to the correct terminal session."""
 
 from __future__ import annotations
 
@@ -9,7 +9,8 @@ import time
 import numpy as np
 
 from verbal_direction.core.event_bus import EventBus, Event, EventType
-from verbal_direction.core.session_manager import SessionManager
+from verbal_direction.core.process_discovery import DiscoveredSession
+from verbal_direction.core.terminal_router import inject_text, inject_text_xdotool
 from verbal_direction.intelligence.response_classifier import ResponseClassifier
 from verbal_direction.voice.audio_device import AudioDeviceManager
 from verbal_direction.voice.recorder import VoiceRecorder
@@ -19,17 +20,15 @@ from verbal_direction.voice.vad import VADDetector
 
 logger = logging.getLogger(__name__)
 
-CHUNK_DURATION = 0.032  # 32ms chunks for VAD
 CHUNK_SIZE = 512  # samples at 16kHz
 
 
 class VoiceRouter:
-    """Main voice I/O loop: listens for speech, transcribes, and routes to sessions."""
+    """Listens for speech, transcribes, and routes to the correct terminal."""
 
     def __init__(
         self,
         event_bus: EventBus,
-        session_manager: SessionManager,
         tts: TTSEngine,
         stt: STTEngine,
         vad: VADDetector,
@@ -37,7 +36,6 @@ class VoiceRouter:
         response_classifier: ResponseClassifier,
     ) -> None:
         self._event_bus = event_bus
-        self._session_manager = session_manager
         self._tts = tts
         self._stt = stt
         self._vad = vad
@@ -46,15 +44,22 @@ class VoiceRouter:
         self._recorder = VoiceRecorder(sample_rate=audio.sample_rate)
         self._running = False
 
+        # Discovered sessions (updated externally)
+        self._sessions: dict[str, DiscoveredSession] = {}
         # Track which sessions asked questions and when
         self._question_order: list[tuple[str, float]] = []
+        # Pending questions per session
+        self._pending_questions: dict[str, str] = {}
 
-        # Subscribe to question/permission/error events for TTS
+        # Subscribe to question/error events for TTS
         self._tts_queue = event_bus.subscribe(
             EventType.SESSION_QUESTION,
-            EventType.SESSION_PERMISSION,
             EventType.SESSION_ERROR,
         )
+
+    def set_sessions(self, sessions: list[DiscoveredSession]) -> None:
+        """Update the set of discovered sessions."""
+        self._sessions = {s.label: s for s in sessions}
 
     async def start(self) -> None:
         """Start the voice router."""
@@ -65,20 +70,15 @@ class VoiceRouter:
         )
 
     async def stop(self) -> None:
-        """Stop the voice router."""
         self._running = False
         self._event_bus.unsubscribe(self._tts_queue)
 
     async def _tts_loop(self) -> None:
-        """Read question/error events and speak them."""
+        """Speak questions/errors from Claude sessions."""
         while self._running:
             try:
                 event = await asyncio.wait_for(self._tts_queue.get(), timeout=0.5)
             except asyncio.TimeoutError:
-                continue
-
-            session = self._session_manager.get(event.session_name)
-            if session and session.state.voice_paused:
                 continue
 
             text = event.data.get("text", "") if event.data else ""
@@ -87,13 +87,17 @@ class VoiceRouter:
 
             # Track question order for routing
             self._question_order.append((event.session_name, time.time()))
-            # Keep only last 20 entries
             self._question_order = self._question_order[-20:]
 
-            await self._tts.speak_async(text, session_name=event.session_name)
+            # Store pending question
+            self._pending_questions[event.session_name] = text
+
+            # Truncate long text for speech
+            speak_text = text[:300] if len(text) > 300 else text
+            await self._tts.speak_async(speak_text, session_name=event.session_name)
 
     async def _listen_loop(self) -> None:
-        """Listen for speech, transcribe, and route."""
+        """Listen for speech, transcribe, and inject into terminals."""
         audio_queue: asyncio.Queue[np.ndarray] = asyncio.Queue()
         speech_buffer: list[np.ndarray] = []
 
@@ -110,7 +114,7 @@ class VoiceRouter:
         )
 
         with stream:
-            logger.info("Voice listener started")
+            logger.info("Voice listener started — mic active")
             while self._running:
                 try:
                     chunk = await asyncio.wait_for(audio_queue.get(), timeout=0.5)
@@ -121,7 +125,6 @@ class VoiceRouter:
 
                 if result["speech_started"]:
                     speech_buffer.clear()
-                    logger.debug("Speech started")
 
                 if result["is_speech"] or self._vad._is_speaking:
                     speech_buffer.append(chunk)
@@ -138,10 +141,10 @@ class VoiceRouter:
 
                     logger.info("Heard: %s", text)
 
-                    # Route the response
-                    target = await self._determine_target(text)
+                    # Determine target session
+                    target = self._determine_target(text)
 
-                    # Save audio segment for training
+                    # Save audio for training
                     self._recorder.save_segment(
                         audio=audio_data,
                         transcription=text,
@@ -154,50 +157,66 @@ class VoiceRouter:
                         data={"text": text},
                     ))
 
-                    if target:
-                        await self._event_bus.publish(Event(
-                            type=EventType.VOICE_ROUTED,
-                            session_name=target,
-                            data={"text": text, "target_session": target},
-                        ))
-                    else:
-                        logger.warning("Could not route response: %s", text)
+                    if target and target in self._sessions:
+                        session = self._sessions[target]
 
-    async def _determine_target(self, text: str) -> str | None:
+                        # Strip session name prefix if used for routing
+                        clean_text = text
+                        for prefix in [f"{target}:", f"{target},"]:
+                            if clean_text.lower().startswith(prefix.lower()):
+                                clean_text = clean_text[len(prefix):].strip()
+                                break
+
+                        # Inject into the terminal
+                        success = await asyncio.get_event_loop().run_in_executor(
+                            None, inject_text, session, clean_text
+                        )
+                        if not success:
+                            # Fallback to xdotool
+                            success = await asyncio.get_event_loop().run_in_executor(
+                                None, inject_text_xdotool, session, clean_text
+                            )
+
+                        if success:
+                            # Clear pending question
+                            self._pending_questions.pop(target, None)
+                            await self._event_bus.publish(Event(
+                                type=EventType.VOICE_ROUTED,
+                                session_name=target,
+                                data={"text": clean_text, "target_session": target},
+                            ))
+                        else:
+                            logger.error("Failed to inject response into %s", target)
+                    else:
+                        logger.warning("No target session for: %s", text)
+
+    def _determine_target(self, text: str) -> str | None:
         """Determine which session a voice response targets."""
-        waiting = self._session_manager.get_waiting_sessions()
-        if not waiting:
+        if not self._pending_questions:
+            # No pending questions — try all sessions
+            if len(self._sessions) == 1:
+                return next(iter(self._sessions))
             return None
 
-        # Check for explicit session name prefix (e.g., "frontend: use tailwind")
+        # Check for explicit session name prefix
         text_lower = text.lower()
-        for session in waiting:
-            if text_lower.startswith(f"{session.name.lower()}:"):
-                return session.name
-            if text_lower.startswith(f"{session.name.lower()},"):
-                return session.name
+        for label in self._sessions:
+            if text_lower.startswith(f"{label.lower()}:"):
+                return label
+            if text_lower.startswith(f"{label.lower()},"):
+                return label
 
-        # If only one session is waiting, route there
-        if len(waiting) == 1:
-            return waiting[0].name
+        # If only one session has a pending question, route there
+        if len(self._pending_questions) == 1:
+            return next(iter(self._pending_questions))
 
-        # Use last-asked-first priority
+        # Last-asked-first priority
         for name, _ts in reversed(self._question_order):
-            for session in waiting:
-                if session.name == name:
-                    return session.name
+            if name in self._pending_questions:
+                return name
 
-        # Fall back to Ollama classification
-        sessions_map = {}
-        for session in waiting:
-            q = session.state.pending_question
-            if q:
-                sessions_map[session.name] = q.text
+        # Fallback: first pending session
+        if self._pending_questions:
+            return next(iter(self._pending_questions))
 
-        if sessions_map:
-            result = await self._classifier.route_response(text, sessions_map)
-            if result:
-                return result
-
-        # Last resort: first waiting session
-        return waiting[0].name
+        return None
