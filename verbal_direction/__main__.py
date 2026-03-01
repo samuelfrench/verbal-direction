@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -92,14 +93,24 @@ def listen(ctx: click.Context) -> None:
             response_classifier=response_classifier,
         )
 
+        # Detect our own TTY so we can exclude it from monitoring
+        own_tty = os.ttyname(0) if os.isatty(0) else None
+
+        def _filter_sessions(sessions: list) -> list:
+            """Exclude our own terminal from the session list."""
+            return [s for s in sessions if s.tty != own_tty]
+
         # Discover running sessions
-        sessions = discover_sessions()
+        all_sessions = discover_sessions()
+        sessions = _filter_sessions(all_sessions)
         if sessions:
-            click.echo(f"Found {len(sessions)} Claude session(s):")
+            click.echo(f"Monitoring {len(sessions)} Claude session(s):")
             for s in sessions:
                 click.echo(f"  {s.label} (PID={s.pid}, TTY={s.tty})")
         else:
             click.echo("No Claude sessions found — will re-scan periodically.")
+        if len(all_sessions) > len(sessions):
+            click.echo(f"  (excluded own terminal {own_tty})")
 
         transcript_monitor.set_sessions(sessions)
         voice_router.set_sessions(sessions)
@@ -113,7 +124,7 @@ def listen(ctx: click.Context) -> None:
         async def _rescan() -> None:
             while True:
                 await asyncio.sleep(10)
-                new_sessions = discover_sessions()
+                new_sessions = _filter_sessions(discover_sessions())
                 transcript_monitor.set_sessions(new_sessions)
                 voice_router.set_sessions(new_sessions)
 
