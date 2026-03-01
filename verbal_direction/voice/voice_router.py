@@ -98,7 +98,9 @@ class VoiceRouter:
 
     async def _listen_loop(self) -> None:
         """Listen for speech, transcribe, and inject into terminals."""
-        audio_queue: asyncio.Queue[np.ndarray] = asyncio.Queue()
+        import queue as thread_queue
+        # Use a thread-safe queue since sounddevice callbacks run in a separate thread
+        audio_queue: thread_queue.Queue[np.ndarray] = thread_queue.Queue()
         speech_buffer: list[np.ndarray] = []
 
         def audio_callback(indata: np.ndarray, frames: int, time_info: dict, status: int) -> None:
@@ -116,9 +118,11 @@ class VoiceRouter:
         with stream:
             logger.info("Voice listener started — mic active")
             while self._running:
+                # Poll the thread-safe queue from asyncio
                 try:
-                    chunk = await asyncio.wait_for(audio_queue.get(), timeout=0.5)
-                except asyncio.TimeoutError:
+                    chunk = audio_queue.get_nowait()
+                except thread_queue.Empty:
+                    await asyncio.sleep(0.02)
                     continue
 
                 result = self._vad.process_chunk(chunk)

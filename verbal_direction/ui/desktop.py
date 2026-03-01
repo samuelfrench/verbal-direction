@@ -535,8 +535,36 @@ class VDDesktopApp(QMainWindow):
             card.set_selected(n == label)
 
     def _on_device_changed(self, kind: str, device_index) -> None:
-        name = "System Default" if device_index is None else f"device {device_index}"
-        self._append_output("system", f"Audio {kind} changed to {name}")
+        try:
+            import sounddevice as sd
+            dev_name = "System Default"
+            if device_index is not None:
+                dev_name = sd.query_devices(device_index)["name"]
+        except Exception:
+            dev_name = str(device_index)
+
+        self._append_output("system", f"Audio {kind} → {dev_name}")
+
+        # Update the live audio manager if we have one
+        if hasattr(self, "_audio_manager") and self._audio_manager:
+            if kind == "input":
+                self._audio_manager.input_device = device_index
+                self._append_output("system", "Mic change takes effect on next voice restart")
+            elif kind == "output":
+                self._audio_manager.output_device = device_index
+                self._append_output("system", "Speaker change takes effect on next TTS output")
+
+        # Signal to restart voice router if running
+        if hasattr(self, "_restart_voice_callback") and self._restart_voice_callback:
+            self._restart_voice_callback(kind, device_index)
+
+    def set_audio_manager(self, audio_manager) -> None:
+        """Set the AudioDeviceManager so device changes take effect."""
+        self._audio_manager = audio_manager
+
+    def set_restart_voice_callback(self, callback) -> None:
+        """Set callback to restart voice router when devices change."""
+        self._restart_voice_callback = callback
 
     # --- Public methods for event bridge ---
 
@@ -581,12 +609,137 @@ class VDDesktopApp(QMainWindow):
 
 
 def run_desktop_app() -> None:
-    """Launch the desktop GUI application."""
+    """Launch the desktop GUI with embedded voice listener."""
+    import os
+    import qasync
+    from verbal_direction.config import Config
+    from verbal_direction.core.event_bus import EventBus, Event, EventType
+    from verbal_direction.core.process_discovery import discover_sessions
+    from verbal_direction.core.transcript_monitor import TranscriptMonitor
+    from verbal_direction.intelligence.attention_filter import AttentionFilter
+    from verbal_direction.intelligence.response_classifier import ResponseClassifier
+    from verbal_direction.voice.audio_device import AudioDeviceManager
+    from verbal_direction.voice.tts import TTSEngine
+    from verbal_direction.voice.stt import STTEngine
+    from verbal_direction.voice.vad import VADDetector
+    from verbal_direction.voice.voice_router import VoiceRouter
+
     app = QApplication.instance() or QApplication(sys.argv)
     app.setApplicationName("verbal-direction")
     app.setStyleSheet(DARK_THEME)
 
+    loop = qasync.QEventLoop(app)
+    asyncio.set_event_loop(loop)
+
+    config = Config.load()
+    event_bus = EventBus()
+    audio = AudioDeviceManager(config.audio)
+
     window = VDDesktopApp()
+    window.set_audio_manager(audio)
     window.show()
 
-    app.exec()
+    own_tty = os.ttyname(0) if os.isatty(0) else None
+
+    def filter_sessions(sessions):
+        return [s for s in sessions if s.tty != own_tty]
+
+    # Voice components
+    attention_filter = AttentionFilter(config.ollama)
+    response_classifier = ResponseClassifier(config.ollama)
+    tts = TTSEngine(config.voice, audio)
+    stt = STTEngine(config.voice)
+    vad = VADDetector(config.voice)
+
+    transcript_monitor = TranscriptMonitor(event_bus, attention_filter)
+    voice_router = VoiceRouter(
+        event_bus=event_bus, tts=tts, stt=stt, vad=vad,
+        audio=audio, response_classifier=response_classifier,
+    )
+
+    # Bridge events to GUI
+    event_queue = event_bus.subscribe_all()
+
+    async def event_bridge():
+        while True:
+            event = await event_queue.get()
+            try:
+                if event.type == EventType.SESSION_QUESTION:
+                    text = event.data.get("text", "") if event.data else ""
+                    window.set_question(event.session_name, text)
+                    window.append_output(event.session_name, f"? {text[:200]}")
+                elif event.type == EventType.SESSION_ERROR:
+                    text = event.data.get("text", "") if event.data else ""
+                    window.append_output(event.session_name, f"ERR: {text[:200]}")
+                elif event.type == EventType.SESSION_INFO:
+                    text = event.data.get("text", "") if event.data else ""
+                    window.append_output(event.session_name, text[:200])
+                elif event.type == EventType.VOICE_TRANSCRIPTION:
+                    text = event.data.get("text", "") if event.data else ""
+                    if text:
+                        window.set_last_heard(text)
+                        window.append_output("voice", f"Heard: {text}")
+                elif event.type == EventType.VOICE_ROUTED:
+                    target = event.data.get("target_session", "") if event.data else ""
+                    text = event.data.get("text", "") if event.data else ""
+                    window.clear_question(target)
+                    window.append_output("voice", f"-> {target}: {text}")
+            except Exception as e:
+                logger.error("Event bridge error: %s", e)
+
+    # Restart voice router when audio device changes
+    voice_task = None
+    rescan_task = None
+
+    async def start_voice():
+        nonlocal voice_task, rescan_task
+
+        sessions = filter_sessions(discover_sessions())
+        if sessions:
+            window.append_output("system", f"Found {len(sessions)} Claude session(s)")
+            for s in sessions:
+                window.append_output("system", f"  {s.label} (PID={s.pid}, {s.tty})")
+        else:
+            window.append_output("system", "No Claude sessions found — rescanning...")
+
+        transcript_monitor.set_sessions(sessions)
+        voice_router.set_sessions(sessions)
+        await transcript_monitor.start()
+
+        async def rescan():
+            while True:
+                await asyncio.sleep(10)
+                new_sessions = filter_sessions(discover_sessions())
+                transcript_monitor.set_sessions(new_sessions)
+                voice_router.set_sessions(new_sessions)
+
+        rescan_task = asyncio.create_task(rescan())
+        voice_task = asyncio.create_task(voice_router.start())
+        window.append_output("system", "Voice listener started")
+
+    async def stop_voice():
+        nonlocal voice_task, rescan_task
+        if rescan_task:
+            rescan_task.cancel()
+        if voice_task:
+            voice_task.cancel()
+        await transcript_monitor.stop()
+        await voice_router.stop()
+
+    def on_device_restart(kind, device_index):
+        """Restart voice router with new audio device."""
+        async def _restart():
+            window.append_output("system", "Restarting voice with new audio device...")
+            await stop_voice()
+            await asyncio.sleep(0.5)
+            await start_voice()
+        loop.create_task(_restart())
+
+    window.set_restart_voice_callback(on_device_restart)
+
+    # Start everything
+    loop.create_task(event_bridge())
+    loop.create_task(start_voice())
+
+    with loop:
+        loop.run_forever()
