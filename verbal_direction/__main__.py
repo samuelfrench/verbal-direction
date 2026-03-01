@@ -180,6 +180,15 @@ def listen(ctx: click.Context) -> None:
 
 
 @cli.command()
+@click.pass_context
+def gui(ctx: click.Context) -> None:
+    """Launch the desktop GUI dashboard."""
+    from verbal_direction.ui.desktop import run_desktop_app
+
+    run_desktop_app()
+
+
+@cli.command()
 def devices() -> None:
     """List available audio devices."""
     from verbal_direction.voice.audio_device import list_devices

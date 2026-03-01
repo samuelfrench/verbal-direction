@@ -12,6 +12,7 @@ from verbal_direction.core.event_bus import EventBus, Event, EventType
 from verbal_direction.core.session_manager import SessionManager
 from verbal_direction.intelligence.response_classifier import ResponseClassifier
 from verbal_direction.voice.audio_device import AudioDeviceManager
+from verbal_direction.voice.recorder import VoiceRecorder
 from verbal_direction.voice.stt import STTEngine
 from verbal_direction.voice.tts import TTSEngine
 from verbal_direction.voice.vad import VADDetector
@@ -42,6 +43,7 @@ class VoiceRouter:
         self._vad = vad
         self._audio = audio
         self._classifier = response_classifier
+        self._recorder = VoiceRecorder(sample_rate=audio.sample_rate)
         self._running = False
 
         # Track which sessions asked questions and when
@@ -136,14 +138,22 @@ class VoiceRouter:
 
                     logger.info("Heard: %s", text)
 
+                    # Route the response
+                    target = await self._determine_target(text)
+
+                    # Save audio segment for training
+                    self._recorder.save_segment(
+                        audio=audio_data,
+                        transcription=text,
+                        session_name=target or "",
+                    )
+
                     await self._event_bus.publish(Event(
                         type=EventType.VOICE_TRANSCRIPTION,
                         session_name="",
                         data={"text": text},
                     ))
 
-                    # Route the response
-                    target = await self._determine_target(text)
                     if target:
                         await self._event_bus.publish(Event(
                             type=EventType.VOICE_ROUTED,
