@@ -245,6 +245,7 @@ class AudioSettingsPanel(QWidget):
 
         self._tts_mode_combo = QComboBox()
         self._tts_mode_combo.addItem("All messages", "all")
+        self._tts_mode_combo.addItem("Smart (questions & errors)", "smart")
         self._tts_mode_combo.addItem("Questions only", "questions")
         self._tts_mode_combo.currentIndexChanged.connect(self._on_tts_mode_changed)
         tts_layout.addWidget(self._tts_mode_combo)
@@ -576,6 +577,10 @@ class VDDesktopApp(QMainWindow):
         """Set the voice router so GUI can control routing."""
         self._voice_router = voice_router
 
+    def set_transcript_monitor(self, transcript_monitor) -> None:
+        """Set the transcript monitor so GUI can control classification mode."""
+        self._transcript_monitor = transcript_monitor
+
     def _toggle_pause(self) -> None:
         self._is_paused = not self._is_paused
         if self._is_paused:
@@ -605,6 +610,8 @@ class VDDesktopApp(QMainWindow):
         self._append_output("system", f"TTS mode: {mode}")
         if hasattr(self, "_voice_router") and self._voice_router:
             self._voice_router.set_tts_mode(mode)
+        if hasattr(self, "_transcript_monitor") and self._transcript_monitor:
+            self._transcript_monitor.set_tts_mode(mode)
 
     def _on_device_changed(self, kind: str, device_index) -> None:
         try:
@@ -730,8 +737,9 @@ def run_desktop_app() -> None:
         audio=audio, response_classifier=response_classifier,
     )
 
-    # Wire voice router to GUI so card clicks set default target
+    # Wire voice router and transcript monitor to GUI
     window.set_voice_router(voice_router)
+    window.set_transcript_monitor(transcript_monitor)
 
     # Bridge events to GUI
     event_queue = event_bus.subscribe_all()

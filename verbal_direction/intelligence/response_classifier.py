@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import functools
 import logging
 
 import ollama as ollama_client
@@ -29,6 +31,15 @@ class ResponseClassifier:
     def __init__(self, config: OllamaConfig | None = None) -> None:
         self._config = config or OllamaConfig()
         self._client = ollama_client.Client(host=self._config.host)
+
+    def _sync_route(self, prompt: str) -> str:
+        """Synchronous Ollama call — meant to run in a thread executor."""
+        response = self._client.chat(
+            model=self._config.model,
+            messages=[{"role": "user", "content": prompt}],
+            options={"temperature": 0.0, "num_predict": 20},
+        )
+        return response["message"]["content"].strip()
 
     async def route_response(
         self,
@@ -60,12 +71,10 @@ class ResponseClassifier:
         )
 
         try:
-            response = self._client.chat(
-                model=self._config.model,
-                messages=[{"role": "user", "content": prompt}],
-                options={"temperature": 0.0, "num_predict": 20},
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(
+                None, functools.partial(self._sync_route, prompt)
             )
-            result = response["message"]["content"].strip()
 
             if result == "UNKNOWN":
                 return None

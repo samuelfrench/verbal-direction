@@ -111,9 +111,15 @@ class VoiceRouter:
             if self._paused:
                 continue
 
-            # In "questions" mode, skip informational messages
+            # In "questions" mode, skip all non-question/error messages
             if self._tts_mode == "questions" and event.type == EventType.SESSION_INFO:
                 continue
+
+            # In "smart" mode, skip plain informational but allow meaningful results
+            if self._tts_mode == "smart" and event.type == EventType.SESSION_INFO:
+                classification = event.data.get("classification", "") if event.data else ""
+                if classification != "meaningful":
+                    continue
 
             # Track question order for routing (only for questions)
             if event.type == EventType.SESSION_QUESTION:

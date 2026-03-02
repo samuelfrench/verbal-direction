@@ -32,6 +32,13 @@ class TranscriptMonitor:
         # Track sessions we're monitoring
         self._sessions: dict[str, DiscoveredSession] = {}
         self._task: asyncio.Task | None = None
+        # TTS mode — when "all", skip classification (saves ~1-2s per message)
+        self._tts_mode: str = "all"
+
+    def set_tts_mode(self, mode: str) -> None:
+        """Set TTS mode. When 'all', skip Ollama classification for speed."""
+        self._tts_mode = mode
+        logger.info("Transcript monitor TTS mode set to: %s", mode)
 
     def set_sessions(self, sessions: list[DiscoveredSession]) -> None:
         """Update the set of sessions to monitor."""
@@ -124,7 +131,20 @@ class TranscriptMonitor:
 
         logger.info("Processing assistant text from %s: %s", label, text[:80])
 
-        # Classify with attention filter
+        # In "all" mode, skip Ollama classification — just publish as info (saves 1-2s per msg)
+        if self._tts_mode == "all":
+            await self._event_bus.publish(Event(
+                type=EventType.SESSION_INFO,
+                session_name=label,
+                data={
+                    "text": text[:300],
+                    "classification": "informational",
+                    "session": session,
+                },
+            ))
+            return
+
+        # Classify with attention filter (needed for "smart" and "questions" modes)
         try:
             classification = await self._attention_filter.classify(text)
         except Exception as e:
@@ -148,6 +168,16 @@ class TranscriptMonitor:
                 data={
                     "text": text,
                     "classification": classification,
+                    "session": session,
+                },
+            ))
+        elif classification == "meaningful":
+            await self._event_bus.publish(Event(
+                type=EventType.SESSION_INFO,
+                session_name=label,
+                data={
+                    "text": text[:300],
+                    "classification": "meaningful",
                     "session": session,
                 },
             ))
