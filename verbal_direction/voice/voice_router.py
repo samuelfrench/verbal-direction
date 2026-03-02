@@ -52,11 +52,14 @@ class VoiceRouter:
         self._pending_questions: dict[str, str] = {}
         # Default target session (set via GUI click)
         self._default_target: str | None = None
+        # TTS mode: "questions" = only questions/errors, "all" = all messages
+        self._tts_mode: str = "questions"
 
-        # Subscribe to question/error events for TTS
+        # Subscribe to all session events for TTS (filter in _tts_loop)
         self._tts_queue = event_bus.subscribe(
             EventType.SESSION_QUESTION,
             EventType.SESSION_ERROR,
+            EventType.SESSION_INFO,
         )
 
     def set_sessions(self, sessions: list[DiscoveredSession]) -> None:
@@ -67,6 +70,11 @@ class VoiceRouter:
         """Set the default target session (e.g. via GUI click)."""
         self._default_target = label
         logger.info("Default target set to: %s", label)
+
+    def set_tts_mode(self, mode: str) -> None:
+        """Set TTS mode: 'questions' or 'all'."""
+        self._tts_mode = mode
+        logger.info("TTS mode set to: %s", mode)
 
     async def start(self) -> None:
         """Start the voice router."""
@@ -81,7 +89,7 @@ class VoiceRouter:
         self._event_bus.unsubscribe(self._tts_queue)
 
     async def _tts_loop(self) -> None:
-        """Speak questions/errors from Claude sessions."""
+        """Speak questions/errors/info from Claude sessions based on TTS mode."""
         while self._running:
             try:
                 event = await asyncio.wait_for(self._tts_queue.get(), timeout=0.5)
@@ -92,15 +100,19 @@ class VoiceRouter:
             if not text:
                 continue
 
-            # Track question order for routing
-            self._question_order.append((event.session_name, time.time()))
-            self._question_order = self._question_order[-20:]
+            # In "questions" mode, skip informational messages
+            if self._tts_mode == "questions" and event.type == EventType.SESSION_INFO:
+                continue
 
-            # Store pending question
-            self._pending_questions[event.session_name] = text
+            # Track question order for routing (only for questions)
+            if event.type == EventType.SESSION_QUESTION:
+                self._question_order.append((event.session_name, time.time()))
+                self._question_order = self._question_order[-20:]
+                self._pending_questions[event.session_name] = text
 
             # Truncate long text for speech
             speak_text = text[:300] if len(text) > 300 else text
+            logger.info("TTS speaking (%s): %s", event.type.name, speak_text[:80])
             await self._tts.speak_async(speak_text, session_name=event.session_name)
 
     async def _listen_loop(self) -> None:

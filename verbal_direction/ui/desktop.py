@@ -220,9 +220,10 @@ class SessionCard(QFrame):
 
 
 class AudioSettingsPanel(QWidget):
-    """Audio device selection panel."""
+    """Audio device selection and TTS settings panel."""
 
     device_changed = pyqtSignal(str, object)  # kind, device_index_or_none
+    tts_mode_changed = pyqtSignal(str)  # "questions" or "all"
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -233,6 +234,24 @@ class AudioSettingsPanel(QWidget):
         layout.setContentsMargins(8, 4, 8, 8)
         layout.setSpacing(8)
 
+        # TTS mode
+        tts_group = QGroupBox("VOICE OUTPUT")
+        tts_layout = QVBoxLayout(tts_group)
+        tts_layout.setSpacing(6)
+
+        tts_label = QLabel("Read aloud")
+        tts_label.setStyleSheet("font-size: 12px; font-weight: bold; color: #94a3b8;")
+        tts_layout.addWidget(tts_label)
+
+        self._tts_mode_combo = QComboBox()
+        self._tts_mode_combo.addItem("Questions only", "questions")
+        self._tts_mode_combo.addItem("All messages", "all")
+        self._tts_mode_combo.currentIndexChanged.connect(self._on_tts_mode_changed)
+        tts_layout.addWidget(self._tts_mode_combo)
+
+        layout.addWidget(tts_group)
+
+        # Audio devices
         group = QGroupBox("AUDIO DEVICES")
         group_layout = QVBoxLayout(group)
         group_layout.setSpacing(8)
@@ -290,6 +309,10 @@ class AudioSettingsPanel(QWidget):
 
         self._input_combo.blockSignals(False)
         self._output_combo.blockSignals(False)
+
+    def _on_tts_mode_changed(self, index: int) -> None:
+        mode = self._tts_mode_combo.currentData()
+        self.tts_mode_changed.emit(mode)
 
     def _on_input_changed(self, index: int) -> None:
         device = self._input_combo.currentData()
@@ -375,6 +398,7 @@ class VDDesktopApp(QMainWindow):
         # Audio settings panel
         self._audio_panel = AudioSettingsPanel()
         self._audio_panel.device_changed.connect(self._on_device_changed)
+        self._audio_panel.tts_mode_changed.connect(self._on_tts_mode_changed)
         left_layout.addWidget(self._audio_panel)
 
         splitter.addWidget(left_widget)
@@ -542,6 +566,11 @@ class VDDesktopApp(QMainWindow):
     def set_voice_router(self, voice_router) -> None:
         """Set the voice router so GUI can control routing."""
         self._voice_router = voice_router
+
+    def _on_tts_mode_changed(self, mode: str) -> None:
+        self._append_output("system", f"TTS mode: {mode}")
+        if hasattr(self, "_voice_router") and self._voice_router:
+            self._voice_router.set_tts_mode(mode)
 
     def _on_device_changed(self, kind: str, device_index) -> None:
         try:
