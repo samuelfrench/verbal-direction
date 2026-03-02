@@ -1,67 +1,112 @@
-"""Terminal router — inject typed responses into terminal sessions via PTY master."""
+"""Terminal router — inject typed responses into terminal sessions via xdotool."""
 
 from __future__ import annotations
 
 import logging
 import os
 import subprocess
+import time
 
 from verbal_direction.core.process_discovery import DiscoveredSession
 
 logger = logging.getLogger(__name__)
 
+# Cache window IDs to avoid slow xdotool searches every time
+_window_cache: dict[int, str] = {}  # pid -> window_id
+
+
+def inject_text_xdotool(session: DiscoveredSession, text: str) -> bool:
+    """Inject text by emulating keyboard input via xdotool.
+
+    Finds the terminal window, activates it, types the text,
+    then restores the previously active window.
+    """
+    # Check cache first
+    window_id = _window_cache.get(session.pid)
+
+    if not window_id or not _window_exists(window_id):
+        # Cache miss or stale — do full search
+        window_id = _find_window_for_session(session)
+        if not window_id:
+            window_id = _find_window_by_title(session)
+        if window_id:
+            _window_cache[session.pid] = window_id
+
+    if not window_id:
+        logger.error("Could not find terminal window for %s (PID=%s)", session.label, session.pid)
+        return False
+
+    try:
+        # Save current active window
+        result = subprocess.run(
+            ["xdotool", "getactivewindow"],
+            capture_output=True, text=True,
+        )
+        original_window = result.stdout.strip() if result.returncode == 0 else None
+
+        # Activate target window so keystrokes go to it
+        subprocess.run(["xdotool", "windowactivate", "--sync", window_id],
+                       capture_output=True)
+        time.sleep(0.05)
+
+        # Type the text + Enter (simulates real keyboard input)
+        subprocess.run(["xdotool", "type", "--clearmodifiers", "--delay", "8", text],
+                       capture_output=True)
+        subprocess.run(["xdotool", "key", "--clearmodifiers", "Return"],
+                       capture_output=True)
+
+        # Restore original window
+        if original_window and original_window != window_id:
+            time.sleep(0.05)
+            subprocess.run(["xdotool", "windowactivate", original_window],
+                           capture_output=True)
+
+        logger.info("Injected via xdotool into window %s: %s", window_id, text[:50])
+        return True
+
+    except Exception as e:
+        logger.error("xdotool typing failed: %s", e)
+        return False
+
+
+def _window_exists(window_id: str) -> bool:
+    """Check if an X window still exists."""
+    result = subprocess.run(
+        ["xdotool", "getwindowname", window_id],
+        capture_output=True, text=True,
+    )
+    return result.returncode == 0
+
 
 def inject_text(session: DiscoveredSession, text: str) -> bool:
-    """Inject text into a terminal session by writing to its PTY master.
-
-    Finds the terminal emulator's PTY master fd for this session's PTS
-    and writes to it, simulating keyboard input. This works on all
-    kernel versions (unlike TIOCSTI which is disabled on kernel 6.2+).
-    """
+    """Fallback: inject text via PTY master write (unreliable with TUI apps)."""
     tty = session.tty
     if not tty:
-        logger.error("No TTY for session %s", session.label)
         return False
 
     pts_num = session.pts_number
     if not pts_num:
-        logger.error("Cannot determine PTS number from %s", tty)
         return False
 
-    # Find the terminal emulator's PTY master fd for this PTS
     master_fd_path = _find_pty_master(int(pts_num))
     if not master_fd_path:
-        logger.debug("PTY master not found for pts/%s, will try xdotool", pts_num)
         return False
-
-    full_text = text + "\n"
 
     try:
         fd = os.open(master_fd_path, os.O_WRONLY | os.O_NOCTTY)
         try:
-            os.write(fd, full_text.encode())
+            os.write(fd, (text + "\n").encode())
         finally:
             os.close(fd)
-
         logger.info("Injected into pts/%s via PTY master: %s", pts_num, text[:50])
         return True
-
-    except PermissionError:
-        logger.error("Permission denied writing to PTY master %s", master_fd_path)
-        return False
     except OSError as e:
-        logger.error("Failed to write to PTY master %s: %s", master_fd_path, e)
+        logger.error("PTY master write failed: %s", e)
         return False
 
 
 def _find_pty_master(target_pts: int) -> str | None:
-    """Find the PTY master fd path in a terminal emulator process.
-
-    Searches all processes that hold /dev/ptmx fds and checks their
-    fdinfo tty-index to find the master side of the target PTS.
-    """
-    # Find terminal emulator processes that hold ptmx fds
-    # Common terminal emulators: gnome-terminal-server, konsole, xterm, etc.
+    """Find the PTY master fd path in a terminal emulator process."""
     terminal_pids = _find_terminal_emulator_pids()
 
     for pid in terminal_pids:
@@ -81,7 +126,6 @@ def _find_pty_master(target_pts: int) -> str | None:
             if "ptmx" not in link:
                 continue
 
-            # Check the tty-index in fdinfo
             try:
                 with open(f"/proc/{pid}/fdinfo/{fd_name}") as f:
                     for line in f:
@@ -120,51 +164,6 @@ def _find_terminal_emulator_pids() -> list[int]:
         pass
 
     return pids
-
-
-def inject_text_xdotool(session: DiscoveredSession, text: str) -> bool:
-    """Inject text by emulating keyboard input via xdotool.
-
-    Finds the terminal window, activates it, types the text,
-    then restores the previously active window.
-    """
-    window_id = _find_window_for_session(session)
-
-    if not window_id:
-        window_id = _find_window_by_title(session)
-
-    if not window_id:
-        logger.error("Could not find terminal window for %s (PID=%s)", session.label, session.pid)
-        return False
-
-    try:
-        # Save current active window
-        result = subprocess.run(
-            ["xdotool", "getactivewindow"],
-            capture_output=True, text=True,
-        )
-        original_window = result.stdout.strip() if result.returncode == 0 else None
-
-        # Activate target window so keystrokes go to it
-        subprocess.run(["xdotool", "windowactivate", "--sync", window_id])
-        import time
-        time.sleep(0.1)  # let window fully activate
-
-        # Type the text + Enter (simulates real keyboard input)
-        subprocess.run(["xdotool", "type", "--clearmodifiers", "--delay", "10", text])
-        subprocess.run(["xdotool", "key", "--clearmodifiers", "Return"])
-
-        # Restore original window
-        if original_window and original_window != window_id:
-            time.sleep(0.05)
-            subprocess.run(["xdotool", "windowactivate", original_window])
-
-        logger.info("Injected via xdotool into window %s: %s", window_id, text[:50])
-        return True
-
-    except Exception as e:
-        logger.error("xdotool typing failed: %s", e)
-        return False
 
 
 def _find_window_for_session(session: DiscoveredSession) -> str | None:
