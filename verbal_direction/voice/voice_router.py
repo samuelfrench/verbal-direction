@@ -211,6 +211,14 @@ class VoiceRouter:
             except Exception as e:
                 logger.error("Listen loop error: %s — restarting in 2s", e)
                 self._stream_restarts += 1
+                # Free CUDA memory on OOM errors
+                if "out of memory" in str(e).lower():
+                    try:
+                        import torch
+                        torch.cuda.empty_cache()
+                        logger.info("Cleared CUDA cache after OOM")
+                    except Exception:
+                        pass
                 await self._event_bus.publish(Event(
                     type=EventType.VOICE_STREAM_STATUS,
                     session_name="",
@@ -243,7 +251,7 @@ class VoiceRouter:
 
             while self._running:
                 # When paused, still listen for "resume" voice command
-                # but drain the audio queue to prevent buildup
+                # Only transcribe short utterances (<3s) to save VRAM
                 if self._paused:
                     try:
                         chunk = audio_queue.get_nowait()
@@ -256,13 +264,21 @@ class VoiceRouter:
                             speech_start_time = time.time()
                         if result["speech_ended"] and speech_buffer:
                             audio_data = np.concatenate(speech_buffer)
+                            duration = len(audio_data) / self._audio.sample_rate
                             speech_buffer.clear()
                             speech_start_time = 0.0
                             self._vad.reset()
-                            text = await self._stt.transcribe_async(audio_data)
-                            if text and len(text.strip()) >= 2:
-                                logger.info("Heard (paused): %s", text)
-                                await self._handle_voice_command(text)
+                            # Only transcribe short utterances while paused (voice commands)
+                            if duration <= 3.0:
+                                try:
+                                    text = await self._stt.transcribe_async(audio_data)
+                                    if text and len(text.strip()) >= 2:
+                                        logger.info("Heard (paused): %s", text)
+                                        await self._handle_voice_command(text)
+                                except Exception as e:
+                                    logger.warning("Paused STT failed: %s", e)
+                            else:
+                                logger.debug("Ignoring long speech while paused (%.1fs)", duration)
                     except thread_queue.Empty:
                         pass
                     await asyncio.sleep(0.02)
