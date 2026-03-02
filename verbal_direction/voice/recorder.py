@@ -26,6 +26,7 @@ class VoiceRecorder:
         self._sample_rate = sample_rate
         self._session_dir: Path | None = None
         self._segment_count = 0
+        self.enabled = True
 
         self._ensure_dir()
 
@@ -53,6 +54,9 @@ class VoiceRecorder:
         Returns:
             Path to the saved WAV file.
         """
+        if not self.enabled:
+            return Path("/dev/null")
+
         self._segment_count += 1
         timestamp = time.strftime("%H%M%S")
         basename = f"{timestamp}_{self._segment_count:04d}"

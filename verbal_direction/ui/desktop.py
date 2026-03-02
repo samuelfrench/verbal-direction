@@ -224,6 +224,7 @@ class AudioSettingsPanel(QWidget):
 
     device_changed = pyqtSignal(str, object)  # kind, device_index_or_none
     tts_mode_changed = pyqtSignal(str)  # "questions" or "all"
+    recording_toggled = pyqtSignal(bool)  # True = recording on
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -282,7 +283,47 @@ class AudioSettingsPanel(QWidget):
         group_layout.addWidget(refresh_btn)
 
         layout.addWidget(group)
+
+        # Voice recording settings
+        rec_group = QGroupBox("VOICE RECORDING")
+        rec_layout = QVBoxLayout(rec_group)
+        rec_layout.setSpacing(6)
+
+        from PyQt6.QtWidgets import QCheckBox
+        self._recording_checkbox = QCheckBox("Save voice samples for training")
+        self._recording_checkbox.setChecked(True)
+        self._recording_checkbox.setStyleSheet("font-size: 12px; color: #e6e9ed;")
+        self._recording_checkbox.toggled.connect(self._on_recording_toggled)
+        rec_layout.addWidget(self._recording_checkbox)
+
+        from verbal_direction.voice.recorder import DEFAULT_RECORDINGS_DIR
+        self._recordings_path = str(DEFAULT_RECORDINGS_DIR)
+        self._rec_link = QPushButton(f"Open: {self._recordings_path}")
+        self._rec_link.setStyleSheet(
+            "font-size: 11px; color: #7dd3fc; background: transparent; "
+            "border: none; text-align: left; padding: 2px 0;"
+        )
+        self._rec_link.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._rec_link.clicked.connect(self._open_recordings_dir)
+        rec_layout.addWidget(self._rec_link)
+
+        self._rec_count_label = QLabel("Samples this session: 0")
+        self._rec_count_label.setStyleSheet("font-size: 11px; color: #64748b;")
+        rec_layout.addWidget(self._rec_count_label)
+
+        layout.addWidget(rec_group)
+
         self.refresh_devices()
+
+    def _on_recording_toggled(self, checked: bool) -> None:
+        self.recording_toggled.emit(checked)
+
+    def _open_recordings_dir(self) -> None:
+        import subprocess
+        subprocess.Popen(["xdg-open", self._recordings_path])
+
+    def set_recording_count(self, count: int) -> None:
+        self._rec_count_label.setText(f"Samples this session: {count}")
 
     def refresh_devices(self) -> None:
         """Reload audio device list."""
@@ -812,6 +853,23 @@ def run_desktop_app() -> None:
         window._append_output("system", "Paused" if paused else "Resumed")
 
     voice_router.set_pause_callback(on_voice_pause)
+
+    # Wire recording toggle
+    recorder = voice_router._recorder
+
+    def on_recording_toggled(enabled: bool):
+        recorder.enabled = enabled
+        window.append_output("system", f"Voice recording {'enabled' if enabled else 'disabled'}")
+
+    window._audio_panel.recording_toggled.connect(on_recording_toggled)
+
+    # Update recording count periodically
+    def update_rec_count():
+        window._audio_panel.set_recording_count(recorder.segment_count)
+
+    rec_timer = QTimer()
+    rec_timer.timeout.connect(update_rec_count)
+    rec_timer.start(3000)
 
     # Bridge events to GUI
     event_queue = event_bus.subscribe_all()
