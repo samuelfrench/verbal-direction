@@ -473,14 +473,29 @@ class VDDesktopApp(QMainWindow):
         voice_top.addWidget(self._pending_label)
         vbl.addLayout(voice_top)
 
+        voice_mid = QHBoxLayout()
+        self._tts_status_label = QLabel("TTS: idle")
+        self._tts_status_label.setStyleSheet("font-size: 11px; color: #64748b;")
+        voice_mid.addWidget(self._tts_status_label)
+
+        self._stream_health_label = QLabel("Stream: starting")
+        self._stream_health_label.setStyleSheet("font-size: 11px; color: #64748b;")
+        voice_mid.addWidget(self._stream_health_label)
+        voice_mid.addStretch()
+
+        self._tts_queue_label = QLabel("TTS queue: 0")
+        self._tts_queue_label.setObjectName("voice-detail-label")
+        voice_mid.addWidget(self._tts_queue_label)
+        vbl.addLayout(voice_mid)
+
         voice_bottom = QHBoxLayout()
         self._last_heard_label = QLabel("Last heard: —")
         self._last_heard_label.setObjectName("voice-detail-label")
         voice_bottom.addWidget(self._last_heard_label)
         voice_bottom.addStretch()
-        self._tts_queue_label = QLabel("TTS queue: empty")
-        self._tts_queue_label.setObjectName("voice-detail-label")
-        voice_bottom.addWidget(self._tts_queue_label)
+        self._stream_restarts_label = QLabel("")
+        self._stream_restarts_label.setStyleSheet("font-size: 11px; color: #64748b;")
+        voice_bottom.addWidget(self._stream_restarts_label)
         vbl.addLayout(voice_bottom)
 
         root.addWidget(voice_bar)
@@ -668,6 +683,38 @@ class VDDesktopApp(QMainWindow):
     def set_mic_level(self, level: int) -> None:
         self._mic_level.setValue(min(100, max(0, level)))
 
+    def set_tts_status(self, speaking: bool, text: str = "") -> None:
+        if speaking:
+            self._tts_status_label.setText(f"TTS: speaking")
+            self._tts_status_label.setStyleSheet("font-size: 11px; color: #22c55e; font-weight: bold;")
+        else:
+            self._tts_status_label.setText("TTS: idle")
+            self._tts_status_label.setStyleSheet("font-size: 11px; color: #64748b;")
+
+    def set_stream_health(self, status: str, audio_age: float = 0, restarts: int = 0, queue_size: int = 0) -> None:
+        if status == "healthy":
+            self._stream_health_label.setText("Stream: healthy")
+            self._stream_health_label.setStyleSheet("font-size: 11px; color: #22c55e;")
+        elif status == "no_audio":
+            self._stream_health_label.setText(f"Stream: no audio ({audio_age:.0f}s)")
+            self._stream_health_label.setStyleSheet("font-size: 11px; color: #f59e0b; font-weight: bold;")
+        elif status == "restarting":
+            self._stream_health_label.setText("Stream: restarting...")
+            self._stream_health_label.setStyleSheet("font-size: 11px; color: #f87171; font-weight: bold;")
+        elif status == "paused":
+            self._stream_health_label.setText("Stream: paused")
+            self._stream_health_label.setStyleSheet("font-size: 11px; color: #f59e0b;")
+        else:
+            self._stream_health_label.setText(f"Stream: {status}")
+            self._stream_health_label.setStyleSheet("font-size: 11px; color: #64748b;")
+
+        self._tts_queue_label.setText(f"TTS queue: {queue_size}")
+        if restarts > 0:
+            self._stream_restarts_label.setText(f"Restarts: {restarts}")
+            self._stream_restarts_label.setStyleSheet("font-size: 11px; color: #f59e0b;")
+        else:
+            self._stream_restarts_label.setText("")
+
     def _append_output(self, session_name: str, text: str) -> None:
         colors = [
             "#7dd3fc", "#a78bfa", "#34d399", "#fbbf24", "#f87171",
@@ -768,6 +815,19 @@ def run_desktop_app() -> None:
                     text = event.data.get("text", "") if event.data else ""
                     window.clear_question(target)
                     window.append_output("voice", f"-> {target}: {text}")
+                elif event.type == EventType.VOICE_MIC_LEVEL:
+                    level = event.data.get("level", 0) if event.data else 0
+                    window.set_mic_level(level)
+                elif event.type == EventType.VOICE_TTS_STATUS:
+                    speaking = event.data.get("speaking", False) if event.data else False
+                    text = event.data.get("text", "") if event.data else ""
+                    window.set_tts_status(speaking, text)
+                elif event.type == EventType.VOICE_STREAM_STATUS:
+                    status = event.data.get("status", "unknown") if event.data else "unknown"
+                    audio_age = event.data.get("audio_age", 0) if event.data else 0
+                    restarts = event.data.get("stream_restarts", 0) if event.data else 0
+                    queue_size = event.data.get("tts_queue_size", 0) if event.data else 0
+                    window.set_stream_health(status, audio_age, restarts, queue_size)
             except Exception as e:
                 logger.error("Event bridge error: %s", e)
 

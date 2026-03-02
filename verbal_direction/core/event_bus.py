@@ -20,6 +20,9 @@ class EventType(Enum):
     # Voice events
     VOICE_TRANSCRIPTION = auto()  # STT produced text
     VOICE_ROUTED = auto()         # Text routed to a session
+    VOICE_MIC_LEVEL = auto()      # Mic audio level (0-100)
+    VOICE_TTS_STATUS = auto()     # TTS speaking/idle status
+    VOICE_STREAM_STATUS = auto()  # Audio stream health
 
     # Control events
     SESSION_LAUNCHED = auto()

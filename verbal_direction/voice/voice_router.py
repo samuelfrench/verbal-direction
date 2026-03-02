@@ -21,6 +21,9 @@ from verbal_direction.voice.vad import VADDetector
 logger = logging.getLogger(__name__)
 
 CHUNK_SIZE = 512  # samples at 16kHz
+AUDIO_WATCHDOG_TIMEOUT = 5.0  # seconds without audio before restart
+VAD_MAX_SPEECH_DURATION = 30.0  # max seconds of continuous speech before force-end
+TTS_MAX_QUEUE_AGE = 30.0  # drop TTS messages older than this
 
 
 class VoiceRouter:
@@ -52,17 +55,19 @@ class VoiceRouter:
         self._pending_questions: dict[str, str] = {}
         # Default target session (set via GUI click)
         self._default_target: str | None = None
-        # TTS mode: "questions" = only questions/errors, "all" = all messages
+        # TTS mode: "questions" = only questions/errors, "all" = all messages, "smart" = meaningful
         self._tts_mode: str = "all"
         # Pause state
         self._paused: bool = False
 
-        # Subscribe to all session events for TTS (filter in _tts_loop)
-        self._tts_queue = event_bus.subscribe(
-            EventType.SESSION_QUESTION,
-            EventType.SESSION_ERROR,
-            EventType.SESSION_INFO,
-        )
+        # Health tracking
+        self._last_audio_chunk_time: float = 0.0
+        self._last_speech_time: float = 0.0
+        self._tts_speaking: bool = False
+        self._stream_restarts: int = 0
+
+        # TTS queue subscribed on start()
+        self._tts_queue: asyncio.Queue | None = None
 
     def set_sessions(self, sessions: list[DiscoveredSession]) -> None:
         """Update the set of discovered sessions."""
@@ -74,7 +79,7 @@ class VoiceRouter:
         logger.info("Default target set to: %s", label)
 
     def set_tts_mode(self, mode: str) -> None:
-        """Set TTS mode: 'questions' or 'all'."""
+        """Set TTS mode: 'questions', 'all', or 'smart'."""
         self._tts_mode = mode
         logger.info("TTS mode set to: %s", mode)
 
@@ -92,14 +97,48 @@ class VoiceRouter:
             EventType.SESSION_ERROR,
             EventType.SESSION_INFO,
         )
+        self._last_audio_chunk_time = time.time()
         await asyncio.gather(
             self._tts_loop(),
             self._listen_loop(),
+            self._health_monitor_loop(),
         )
 
     async def stop(self) -> None:
         self._running = False
-        self._event_bus.unsubscribe(self._tts_queue)
+        if self._tts_queue:
+            self._event_bus.unsubscribe(self._tts_queue)
+
+    async def _health_monitor_loop(self) -> None:
+        """Periodic health check — publishes stream status to GUI."""
+        while self._running:
+            await asyncio.sleep(2.0)
+
+            now = time.time()
+            audio_age = now - self._last_audio_chunk_time if self._last_audio_chunk_time else 0
+            speech_age = now - self._last_speech_time if self._last_speech_time else 0
+
+            # Determine stream health
+            if self._paused:
+                status = "paused"
+            elif audio_age > AUDIO_WATCHDOG_TIMEOUT:
+                status = "no_audio"
+                logger.warning("No audio data for %.1fs — stream may be dead", audio_age)
+            else:
+                status = "healthy"
+
+            await self._event_bus.publish(Event(
+                type=EventType.VOICE_STREAM_STATUS,
+                session_name="",
+                data={
+                    "status": status,
+                    "audio_age": audio_age,
+                    "speech_age": speech_age,
+                    "tts_speaking": self._tts_speaking,
+                    "tts_queue_size": self._tts_queue.qsize() if self._tts_queue else 0,
+                    "stream_restarts": self._stream_restarts,
+                },
+            ))
 
     async def _tts_loop(self) -> None:
         """Speak questions/errors/info from Claude sessions based on TTS mode."""
@@ -115,6 +154,11 @@ class VoiceRouter:
 
             # Skip if paused
             if self._paused:
+                continue
+
+            # Drop stale messages (older than TTS_MAX_QUEUE_AGE)
+            if time.time() - event.timestamp > TTS_MAX_QUEUE_AGE:
+                logger.debug("Dropping stale TTS message (%.0fs old)", time.time() - event.timestamp)
                 continue
 
             # In "questions" mode, skip all non-question/error messages
@@ -136,14 +180,48 @@ class VoiceRouter:
             # Truncate long text for speech
             speak_text = text[:300] if len(text) > 300 else text
             logger.info("TTS speaking (%s): %s", event.type.name, speak_text[:80])
-            await self._tts.speak_async(speak_text, session_name=event.session_name)
+
+            # Update TTS status
+            self._tts_speaking = True
+            await self._event_bus.publish(Event(
+                type=EventType.VOICE_TTS_STATUS,
+                session_name="",
+                data={"speaking": True, "text": speak_text[:80]},
+            ))
+
+            try:
+                await self._tts.speak_async(speak_text, session_name=event.session_name)
+            except Exception as e:
+                logger.error("TTS speak failed: %s", e)
+            finally:
+                self._tts_speaking = False
+                await self._event_bus.publish(Event(
+                    type=EventType.VOICE_TTS_STATUS,
+                    session_name="",
+                    data={"speaking": False, "text": ""},
+                ))
 
     async def _listen_loop(self) -> None:
         """Listen for speech, transcribe, and inject into terminals."""
+        while self._running:
+            try:
+                await self._listen_once()
+            except Exception as e:
+                logger.error("Listen loop error: %s — restarting in 2s", e)
+                self._stream_restarts += 1
+                await self._event_bus.publish(Event(
+                    type=EventType.VOICE_STREAM_STATUS,
+                    session_name="",
+                    data={"status": "restarting", "error": str(e), "stream_restarts": self._stream_restarts},
+                ))
+                await asyncio.sleep(2.0)
+
+    async def _listen_once(self) -> None:
+        """Single listen session — restarts on error."""
         import queue as thread_queue
-        # Use a thread-safe queue since sounddevice callbacks run in a separate thread
         audio_queue: thread_queue.Queue[np.ndarray] = thread_queue.Queue()
         speech_buffer: list[np.ndarray] = []
+        speech_start_time: float = 0.0
 
         def audio_callback(indata: np.ndarray, frames: int, time_info: dict, status: int) -> None:
             if status:
@@ -159,6 +237,8 @@ class VoiceRouter:
 
         with stream:
             logger.info("Voice listener started — mic active")
+            self._last_audio_chunk_time = time.time()
+
             while self._running:
                 # Skip processing if paused
                 if self._paused:
@@ -169,21 +249,44 @@ class VoiceRouter:
                 try:
                     chunk = audio_queue.get_nowait()
                 except thread_queue.Empty:
+                    # Check for audio stream timeout
+                    if time.time() - self._last_audio_chunk_time > AUDIO_WATCHDOG_TIMEOUT * 2:
+                        logger.error("Audio stream appears dead — forcing restart")
+                        return  # Will be caught by _listen_loop and restarted
                     await asyncio.sleep(0.02)
                     continue
+
+                self._last_audio_chunk_time = time.time()
+
+                # Publish mic level for GUI (every ~10 chunks to avoid flooding)
+                peak = float(np.max(np.abs(chunk)))
+                level = min(100, int(peak * 500))  # scale to 0-100
+                await self._event_bus.publish(Event(
+                    type=EventType.VOICE_MIC_LEVEL,
+                    session_name="",
+                    data={"level": level, "peak": peak},
+                ))
 
                 result = self._vad.process_chunk(chunk)
 
                 if result["speech_started"]:
                     speech_buffer.clear()
+                    speech_start_time = time.time()
 
                 if result["is_speech"] or self._vad._is_speaking:
                     speech_buffer.append(chunk)
 
+                    # VAD timeout — force end if speaking too long
+                    if speech_start_time and (time.time() - speech_start_time) > VAD_MAX_SPEECH_DURATION:
+                        logger.warning("VAD timeout — forcing speech end after %.0fs", VAD_MAX_SPEECH_DURATION)
+                        result["speech_ended"] = True
+
                 if result["speech_ended"] and speech_buffer:
                     audio_data = np.concatenate(speech_buffer)
                     speech_buffer.clear()
+                    speech_start_time = 0.0
                     self._vad.reset()
+                    self._last_speech_time = time.time()
 
                     # Transcribe
                     text = await self._stt.transcribe_async(audio_data)
