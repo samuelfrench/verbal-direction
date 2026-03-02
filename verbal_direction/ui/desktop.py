@@ -438,6 +438,15 @@ class VDDesktopApp(QMainWindow):
         vbl.setContentsMargins(16, 10, 16, 10)
 
         voice_top = QHBoxLayout()
+        self._pause_btn = QPushButton("Pause")
+        self._pause_btn.setStyleSheet(
+            "padding: 4px 14px; font-size: 12px; font-weight: bold; "
+            "background-color: #1e2a36; color: #22c55e; border: 1px solid #22c55e; border-radius: 6px;"
+        )
+        self._pause_btn.clicked.connect(self._toggle_pause)
+        self._is_paused = False
+        voice_top.addWidget(self._pause_btn)
+
         self._voice_icon = QLabel("🎤")
         self._voice_icon.setStyleSheet("font-size: 18px;")
         voice_top.addWidget(self._voice_icon)
@@ -566,6 +575,31 @@ class VDDesktopApp(QMainWindow):
     def set_voice_router(self, voice_router) -> None:
         """Set the voice router so GUI can control routing."""
         self._voice_router = voice_router
+
+    def _toggle_pause(self) -> None:
+        self._is_paused = not self._is_paused
+        if self._is_paused:
+            self._pause_btn.setText("Resume")
+            self._pause_btn.setStyleSheet(
+                "padding: 4px 14px; font-size: 12px; font-weight: bold; "
+                "background-color: #1e2a36; color: #f59e0b; border: 1px solid #f59e0b; border-radius: 6px;"
+            )
+            self._voice_status.setText("Paused")
+            self._voice_status.setStyleSheet("color: #f59e0b; font-size: 13px; font-weight: bold;")
+            self._voice_icon.setText("🔇")
+        else:
+            self._pause_btn.setText("Pause")
+            self._pause_btn.setStyleSheet(
+                "padding: 4px 14px; font-size: 12px; font-weight: bold; "
+                "background-color: #1e2a36; color: #22c55e; border: 1px solid #22c55e; border-radius: 6px;"
+            )
+            self._voice_status.setText("Listening")
+            self._voice_status.setStyleSheet("color: #22c55e; font-size: 13px; font-weight: bold;")
+            self._voice_icon.setText("🎤")
+
+        self._append_output("system", "Paused" if self._is_paused else "Resumed")
+        if hasattr(self, "_voice_router") and self._voice_router:
+            self._voice_router.set_paused(self._is_paused)
 
     def _on_tts_mode_changed(self, mode: str) -> None:
         self._append_output("system", f"TTS mode: {mode}")

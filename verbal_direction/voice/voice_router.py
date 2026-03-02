@@ -54,6 +54,8 @@ class VoiceRouter:
         self._default_target: str | None = None
         # TTS mode: "questions" = only questions/errors, "all" = all messages
         self._tts_mode: str = "questions"
+        # Pause state
+        self._paused: bool = False
 
         # Subscribe to all session events for TTS (filter in _tts_loop)
         self._tts_queue = event_bus.subscribe(
@@ -75,6 +77,11 @@ class VoiceRouter:
         """Set TTS mode: 'questions' or 'all'."""
         self._tts_mode = mode
         logger.info("TTS mode set to: %s", mode)
+
+    def set_paused(self, paused: bool) -> None:
+        """Pause or resume voice listening and TTS."""
+        self._paused = paused
+        logger.info("Voice %s", "paused" if paused else "resumed")
 
     async def start(self) -> None:
         """Start the voice router."""
@@ -98,6 +105,10 @@ class VoiceRouter:
 
             text = event.data.get("text", "") if event.data else ""
             if not text:
+                continue
+
+            # Skip if paused
+            if self._paused:
                 continue
 
             # In "questions" mode, skip informational messages
@@ -137,6 +148,11 @@ class VoiceRouter:
         with stream:
             logger.info("Voice listener started — mic active")
             while self._running:
+                # Skip processing if paused
+                if self._paused:
+                    await asyncio.sleep(0.1)
+                    continue
+
                 # Poll the thread-safe queue from asyncio
                 try:
                     chunk = audio_queue.get_nowait()

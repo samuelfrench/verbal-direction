@@ -9,8 +9,8 @@ from pathlib import Path
 
 @dataclass
 class VoiceConfig:
-    tts_model: str = "en_US-lessac-medium"
-    tts_speed: float = 1.0
+    tts_model: str = "en_US-amy-medium"
+    tts_speed: float = 1.4
     stt_model: str = "base.en"
     vad_threshold: float = 0.5
 
