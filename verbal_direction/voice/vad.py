@@ -85,7 +85,7 @@ class VADDetector:
             self._silence_frames += 1
             self._speech_frames = 0
 
-            if self._is_speaking and self._silence_frames >= 15:
+            if self._is_speaking and self._silence_frames >= 35:
                 self._is_speaking = False
                 speech_ended = True
 
