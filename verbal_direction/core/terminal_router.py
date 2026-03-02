@@ -25,12 +25,13 @@ def inject_text_xdotool(session: DiscoveredSession, text: str) -> bool:
     window_id = _window_cache.get(session.pid)
 
     if not window_id or not _window_exists(window_id):
-        # Cache miss or stale — do full search
-        window_id = _find_window_for_session(session)
+        # Cache miss or stale — search by title first (fast), then PID walk (slow)
+        window_id = _find_window_by_title(session)
         if not window_id:
-            window_id = _find_window_by_title(session)
+            window_id = _find_window_for_session(session)
         if window_id:
             _window_cache[session.pid] = window_id
+            logger.info("Cached window %s for session %s", window_id, session.label)
 
     if not window_id:
         logger.error("Could not find terminal window for %s (PID=%s)", session.label, session.pid)
@@ -189,13 +190,25 @@ def _find_window_for_session(session: DiscoveredSession) -> str | None:
 
 def _find_window_by_title(session: DiscoveredSession) -> str | None:
     """Find X window by searching terminal titles."""
-    for search_term in [session.label, session.cwd, "Claude Code"]:
+    # Search "Claude Code" first — terminal title when Claude is running
+    for search_term in ["Claude Code", session.label, session.cwd]:
         result = subprocess.run(
             ["xdotool", "search", "--name", search_term],
             capture_output=True, text=True,
         )
         windows = [w.strip() for w in result.stdout.strip().split("\n") if w.strip()]
         if windows:
+            # If multiple matches, prefer the one with "Claude Code" in the name
+            for w in windows:
+                try:
+                    name_result = subprocess.run(
+                        ["xdotool", "getwindowname", w],
+                        capture_output=True, text=True,
+                    )
+                    if "Claude Code" in name_result.stdout:
+                        return w
+                except Exception:
+                    pass
             return windows[0]
 
     return None
