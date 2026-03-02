@@ -533,6 +533,15 @@ class VDDesktopApp(QMainWindow):
         self._selected_session = label
         for n, card in self._session_cards.items():
             card.set_selected(n == label)
+        self._append_output("system", f"Default target: {label}")
+
+        # Update voice router's default target
+        if hasattr(self, "_voice_router") and self._voice_router:
+            self._voice_router.set_default_target(label)
+
+    def set_voice_router(self, voice_router) -> None:
+        """Set the voice router so GUI can control routing."""
+        self._voice_router = voice_router
 
     def _on_device_changed(self, kind: str, device_index) -> None:
         try:
@@ -639,12 +648,11 @@ def run_desktop_app() -> None:
     window.set_audio_manager(audio)
     window.show()
 
-    # Exclude our own session: by TTY if available, or by CWD match
-    own_tty = os.ttyname(0) if os.isatty(0) else None
-    own_cwd = os.getcwd()
+    # Wire voice router to GUI after creation (below)
+    # so clicking a session card sets the default routing target
 
     def filter_sessions(sessions):
-        return [s for s in sessions if s.tty != own_tty and s.cwd != own_cwd]
+        return sessions
 
     # Voice components
     attention_filter = AttentionFilter(config.ollama)
@@ -658,6 +666,9 @@ def run_desktop_app() -> None:
         event_bus=event_bus, tts=tts, stt=stt, vad=vad,
         audio=audio, response_classifier=response_classifier,
     )
+
+    # Wire voice router to GUI so card clicks set default target
+    window.set_voice_router(voice_router)
 
     # Bridge events to GUI
     event_queue = event_bus.subscribe_all()

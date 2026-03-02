@@ -50,6 +50,8 @@ class VoiceRouter:
         self._question_order: list[tuple[str, float]] = []
         # Pending questions per session
         self._pending_questions: dict[str, str] = {}
+        # Default target session (set via GUI click)
+        self._default_target: str | None = None
 
         # Subscribe to question/error events for TTS
         self._tts_queue = event_bus.subscribe(
@@ -60,6 +62,11 @@ class VoiceRouter:
     def set_sessions(self, sessions: list[DiscoveredSession]) -> None:
         """Update the set of discovered sessions."""
         self._sessions = {s.label: s for s in sessions}
+
+    def set_default_target(self, label: str) -> None:
+        """Set the default target session (e.g. via GUI click)."""
+        self._default_target = label
+        logger.info("Default target set to: %s", label)
 
     async def start(self) -> None:
         """Start the voice router."""
@@ -223,9 +230,13 @@ class VoiceRouter:
         if len(self._sessions) == 1:
             return next(iter(self._sessions))
 
-        # Multiple sessions, no pending questions — log available targets
+        # Use default target set via GUI click
+        if self._default_target and self._default_target in self._sessions:
+            return self._default_target
+
+        # Multiple sessions, no pending questions, no default — log available targets
         logger.info(
-            "Multiple sessions, no pending question. Prefix with session name: %s",
+            "Multiple sessions, no pending question. Prefix with session name or click a session: %s",
             ", ".join(self._sessions.keys()),
         )
         return None
