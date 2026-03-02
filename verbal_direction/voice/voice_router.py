@@ -68,6 +68,8 @@ class VoiceRouter:
 
         # TTS queue subscribed on start()
         self._tts_queue: asyncio.Queue | None = None
+        # Callback to sync GUI pause button
+        self._on_pause_callback = None
 
     def set_sessions(self, sessions: list[DiscoveredSession]) -> None:
         """Update the set of discovered sessions."""
@@ -240,9 +242,30 @@ class VoiceRouter:
             self._last_audio_chunk_time = time.time()
 
             while self._running:
-                # Skip processing if paused
+                # When paused, still listen for "resume" voice command
+                # but drain the audio queue to prevent buildup
                 if self._paused:
-                    await asyncio.sleep(0.1)
+                    try:
+                        chunk = audio_queue.get_nowait()
+                        self._last_audio_chunk_time = time.time()
+                        result = self._vad.process_chunk(chunk)
+                        if result["is_speech"] or self._vad._is_speaking:
+                            speech_buffer.append(chunk)
+                        if result["speech_started"]:
+                            speech_buffer.clear()
+                            speech_start_time = time.time()
+                        if result["speech_ended"] and speech_buffer:
+                            audio_data = np.concatenate(speech_buffer)
+                            speech_buffer.clear()
+                            speech_start_time = 0.0
+                            self._vad.reset()
+                            text = await self._stt.transcribe_async(audio_data)
+                            if text and len(text.strip()) >= 2:
+                                logger.info("Heard (paused): %s", text)
+                                await self._handle_voice_command(text)
+                    except thread_queue.Empty:
+                        pass
+                    await asyncio.sleep(0.02)
                     continue
 
                 # Poll the thread-safe queue from asyncio
@@ -295,6 +318,10 @@ class VoiceRouter:
 
                     logger.info("Heard: %s", text)
 
+                    # Check for voice commands before routing
+                    if await self._handle_voice_command(text):
+                        continue
+
                     # Determine target session
                     target = self._determine_target(text)
 
@@ -343,6 +370,41 @@ class VoiceRouter:
                             logger.error("Failed to inject response into %s", target)
                     else:
                         logger.warning("No target session for: %s", text)
+
+    async def _handle_voice_command(self, text: str) -> bool:
+        """Check for voice commands. Returns True if handled (don't route to terminal)."""
+        cmd = text.strip().lower().rstrip(".,!?")
+
+        if cmd in ("pause", "pause listening", "stop listening"):
+            logger.info("Voice command: PAUSE")
+            self.set_paused(True)
+            await self._event_bus.publish(Event(
+                type=EventType.VOICE_TRANSCRIPTION,
+                session_name="",
+                data={"text": "[voice command: pause]"},
+            ))
+            # Notify GUI to update pause button state
+            if self._on_pause_callback:
+                self._on_pause_callback(True)
+            return True
+
+        if cmd in ("resume", "resume listening", "start listening"):
+            logger.info("Voice command: RESUME")
+            self.set_paused(False)
+            await self._event_bus.publish(Event(
+                type=EventType.VOICE_TRANSCRIPTION,
+                session_name="",
+                data={"text": "[voice command: resume]"},
+            ))
+            if self._on_pause_callback:
+                self._on_pause_callback(False)
+            return True
+
+        return False
+
+    def set_pause_callback(self, callback) -> None:
+        """Set callback to sync GUI pause button state with voice commands."""
+        self._on_pause_callback = callback
 
     def _determine_target(self, text: str) -> str | None:
         """Determine which session a voice response targets."""

@@ -788,6 +788,31 @@ def run_desktop_app() -> None:
     window.set_voice_router(voice_router)
     window.set_transcript_monitor(transcript_monitor)
 
+    # Sync GUI pause button when voice commands trigger pause/resume
+    def on_voice_pause(paused: bool):
+        window._is_paused = paused
+        if paused:
+            window._pause_btn.setText("Resume")
+            window._pause_btn.setStyleSheet(
+                "padding: 4px 14px; font-size: 12px; font-weight: bold; "
+                "background-color: #1e2a36; color: #f59e0b; border: 1px solid #f59e0b; border-radius: 6px;"
+            )
+            window._voice_status.setText("Paused")
+            window._voice_status.setStyleSheet("color: #f59e0b; font-size: 13px; font-weight: bold;")
+            window._voice_icon.setText("\U0001f507")
+        else:
+            window._pause_btn.setText("Pause")
+            window._pause_btn.setStyleSheet(
+                "padding: 4px 14px; font-size: 12px; font-weight: bold; "
+                "background-color: #1e2a36; color: #22c55e; border: 1px solid #22c55e; border-radius: 6px;"
+            )
+            window._voice_status.setText("Listening")
+            window._voice_status.setStyleSheet("color: #22c55e; font-size: 13px; font-weight: bold;")
+            window._voice_icon.setText("\U0001f3a4")
+        window._append_output("system", "Paused" if paused else "Resumed")
+
+    voice_router.set_pause_callback(on_voice_pause)
+
     # Bridge events to GUI
     event_queue = event_bus.subscribe_all()
 
