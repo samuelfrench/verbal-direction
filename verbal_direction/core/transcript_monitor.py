@@ -105,6 +105,7 @@ class TranscriptMonitor:
         msg_type = data.get("type")
 
         if msg_type != "assistant":
+            logger.debug("Skipping non-assistant message type: %s", msg_type)
             return
 
         # Extract text from assistant message content blocks
@@ -118,7 +119,10 @@ class TranscriptMonitor:
 
         text = "\n".join(text_parts).strip()
         if not text or len(text) < 5:
+            logger.debug("Skipping assistant message with no/short text (%d chars)", len(text) if text else 0)
             return
+
+        logger.info("Processing assistant text from %s: %s", label, text[:80])
 
         # Classify with attention filter
         try:

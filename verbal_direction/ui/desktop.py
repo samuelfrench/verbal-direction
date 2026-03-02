@@ -244,8 +244,8 @@ class AudioSettingsPanel(QWidget):
         tts_layout.addWidget(tts_label)
 
         self._tts_mode_combo = QComboBox()
-        self._tts_mode_combo.addItem("Questions only", "questions")
         self._tts_mode_combo.addItem("All messages", "all")
+        self._tts_mode_combo.addItem("Questions only", "questions")
         self._tts_mode_combo.currentIndexChanged.connect(self._on_tts_mode_changed)
         tts_layout.addWidget(self._tts_mode_combo)
 

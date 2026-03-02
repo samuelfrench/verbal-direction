@@ -53,7 +53,7 @@ class VoiceRouter:
         # Default target session (set via GUI click)
         self._default_target: str | None = None
         # TTS mode: "questions" = only questions/errors, "all" = all messages
-        self._tts_mode: str = "questions"
+        self._tts_mode: str = "all"
         # Pause state
         self._paused: bool = False
 
