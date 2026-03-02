@@ -86,6 +86,12 @@ class VoiceRouter:
     async def start(self) -> None:
         """Start the voice router."""
         self._running = True
+        # Re-subscribe TTS queue in case stop() unsubscribed it
+        self._tts_queue = self._event_bus.subscribe(
+            EventType.SESSION_QUESTION,
+            EventType.SESSION_ERROR,
+            EventType.SESSION_INFO,
+        )
         await asyncio.gather(
             self._tts_loop(),
             self._listen_loop(),
