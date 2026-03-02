@@ -11,13 +11,13 @@ from pathlib import Path
 class VoiceConfig:
     tts_model: str = "en_US-amy-medium"
     tts_speed: float = 1.4
-    stt_model: str = "base.en"
+    stt_model: str = "large-v3"
     vad_threshold: float = 0.5
 
 
 @dataclass
 class OllamaConfig:
-    model: str = "llama3.2"
+    model: str = "qwen3.5:35b-a3b"
     host: str = "http://localhost:11434"
 
 
