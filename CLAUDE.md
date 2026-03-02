@@ -24,6 +24,10 @@ Voice-controlled Claude Code session manager.
 - `textual` — TUI framework
 - `click` — CLI framework
 
+## Important Rules
+- **NEVER commit voice samples/recordings to GitHub** — recordings are stored in `~/.local/share/verbal-direction/recordings/` (outside the repo). The `.gitignore` excludes `*.wav` but be careful with any audio files.
+- Voice recordings are saved automatically for future training purposes. Do not delete them.
+
 ## System Requirements
 - PortAudio: `sudo apt install libportaudio2`
 - Ollama running locally with `llama3.2` model

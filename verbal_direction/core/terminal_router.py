@@ -53,6 +53,7 @@ def inject_text_xdotool(session: DiscoveredSession, text: str) -> bool:
         # Type the text + Enter (simulates real keyboard input)
         subprocess.run(["xdotool", "type", "--clearmodifiers", "--delay", "8", text],
                        capture_output=True)
+        time.sleep(0.15)  # let Claude Code process typed chars before Enter
         subprocess.run(["xdotool", "key", "--clearmodifiers", "Return"],
                        capture_output=True)
 

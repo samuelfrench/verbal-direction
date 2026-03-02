@@ -51,6 +51,7 @@ class TranscriptMonitor:
 
     async def _run(self) -> None:
         """Main polling loop."""
+        logger.info("Transcript monitor started, watching %d sessions", len(self._sessions))
         while True:
             await asyncio.sleep(self._poll_interval)
 
@@ -71,6 +72,7 @@ class TranscriptMonitor:
                 # Read new content
                 new_lines = self._read_new_lines(path, last_pos)
                 self._file_positions[path] = current_size
+                logger.debug("Read %d new lines from %s (+%d bytes)", len(new_lines), label, current_size - last_pos)
 
                 for line_data in new_lines:
                     await self._process_message(label, session, line_data)
