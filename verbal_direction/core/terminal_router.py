@@ -123,7 +123,7 @@ def _find_terminal_emulator_pids() -> list[int]:
 
 
 def inject_text_xdotool(session: DiscoveredSession, text: str) -> bool:
-    """Fallback: use xdotool to type into the terminal window.
+    """Inject text by emulating keyboard input via xdotool.
 
     Finds the terminal window, activates it, types the text,
     then restores the previously active window.
@@ -145,15 +145,18 @@ def inject_text_xdotool(session: DiscoveredSession, text: str) -> bool:
         )
         original_window = result.stdout.strip() if result.returncode == 0 else None
 
-        # Activate target window
+        # Activate target window so keystrokes go to it
         subprocess.run(["xdotool", "windowactivate", "--sync", window_id])
+        import time
+        time.sleep(0.1)  # let window fully activate
 
-        # Type the text + Enter
-        subprocess.run(["xdotool", "type", "--clearmodifiers", "--delay", "5", text])
+        # Type the text + Enter (simulates real keyboard input)
+        subprocess.run(["xdotool", "type", "--clearmodifiers", "--delay", "10", text])
         subprocess.run(["xdotool", "key", "--clearmodifiers", "Return"])
 
         # Restore original window
         if original_window and original_window != window_id:
+            time.sleep(0.05)
             subprocess.run(["xdotool", "windowactivate", original_window])
 
         logger.info("Injected via xdotool into window %s: %s", window_id, text[:50])

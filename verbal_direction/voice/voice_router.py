@@ -178,14 +178,14 @@ class VoiceRouter:
                                 clean_text = clean_text[len(prefix):].strip()
                                 break
 
-                        # Inject into the terminal
+                        # Inject into the terminal via keyboard emulation (xdotool)
                         success = await asyncio.get_event_loop().run_in_executor(
-                            None, inject_text, session, clean_text
+                            None, inject_text_xdotool, session, clean_text
                         )
                         if not success:
-                            # Fallback to xdotool
+                            # Fallback to PTY master write
                             success = await asyncio.get_event_loop().run_in_executor(
-                                None, inject_text_xdotool, session, clean_text
+                                None, inject_text, session, clean_text
                             )
 
                         if success:
